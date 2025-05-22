@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/mbaxamb3/nusli/scraper-service/internal/config"
-	// "github.com/mbaxamb3/nusli/scraper-service/internal/server"
+	"github.com/mbaxamb3/nusli/scraper-service/internal/server"
 	"go.uber.org/zap"
 )
 
