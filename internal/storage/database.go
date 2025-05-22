@@ -8,6 +8,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	db "github.com/mbaxamb3/nusli/scraper-service/db/sqlc"
 	"go.uber.org/zap"
 )
 

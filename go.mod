@@ -5,6 +5,7 @@ go 1.24.2
 require (
 	github.com/caarlos0/env/v6 v6.10.1
 	github.com/go-rod/rod v0.116.2
+	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
