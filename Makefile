@@ -115,7 +115,7 @@ reset-db: dropdb createdb migrateup
 	@echo "Database reset complete!"
 
 
----------
+
 build:
 	go build -o bin/scraper-service cmd/server/main.go
 

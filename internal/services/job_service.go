@@ -1,5 +1,5 @@
-// internal/service/job_service.go
-package service
+// internal/services/job_service.go
+package services
 
 import (
 	"context"
@@ -36,7 +36,6 @@ func NewJobService(db *storage.Database, scraperEngine *scraper.Engine, cfg *con
 	}
 }
 
-// CreateScrapingJob creates a new scraping job
 // CreateScrapingJob creates a new scraping job
 func (js *JobService) CreateScrapingJob(ctx context.Context, req models.ScrapingJobRequest) (*models.ScrapingJob, error) {
 	// Generate unique job ID
