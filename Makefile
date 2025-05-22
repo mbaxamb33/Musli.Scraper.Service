@@ -114,4 +114,33 @@ dev-setup: setup migrateup sqlc
 reset-db: dropdb createdb migrateup
 	@echo "Database reset complete!"
 
-.PHONY: postgres createdb dropdb stoppostgres rmpostgres setup migrateup migratedown createmigration sqlc build server dev test test-coverage fmt vet lint clean docker-build docker-run dev-setup reset-db
+
+---------
+build:
+	go build -o bin/scraper-service cmd/server/main.go
+
+run: build
+	./bin/scraper-service
+
+# Development
+dev-run:
+	go run cmd/server/main.go
+
+# Install missing dependencies
+deps:
+	go mod tidy
+	go get github.com/jackc/pgx/v5
+	go get github.com/jackc/pgx/v5/pgxpool
+
+# Create directory structure
+create-dirs:
+	mkdir -p internal/handlers
+	mkdir -p internal/services  
+	mkdir -p internal/worker
+
+# Full development setup including new structure
+dev-setup-full: setup migrateup sqlc create-dirs deps
+	@echo "Full development environment ready!"
+
+
+.PHONY: postgres createdb dropdb stoppostgres rmpostgres setup migrateup migratedown createmigration sqlc build server dev test test-coverage fmt vet lint clean docker-build docker-run dev-setup reset-db build run dev-run deps create-dirs dev-setup-full

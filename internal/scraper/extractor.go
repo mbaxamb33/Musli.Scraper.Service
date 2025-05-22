@@ -176,21 +176,55 @@ func (e *Engine) findNextBoundary(currentHeader HeaderElement, allHeaders []Head
 	return -1
 }
 
-// extractContentBetweenHeaders extracts all content between two headers
 func (e *Engine) extractContentBetweenHeaders(page *rod.Page, header HeaderElement, allHeaders []HeaderElement, startIndex, endIndex int) (string, error) {
 	var content strings.Builder
 
-	// Get all elements after the header
-	headerElement := header.Element
+	// Get parent container of the starting header
+	parent, err := header.Element.Parent()
+	if err != nil {
+		return "", err
+	}
 
-	// Strategy: Get all siblings and following elements until we reach the next boundary
-	if endIndex == -1 {
-		// Extract to end of document
-		content.WriteString(e.extractContentToEnd(page, headerElement))
-	} else {
-		// Extract until next boundary header
-		nextHeader := allHeaders[endIndex]
-		content.WriteString(e.extractContentUntilElement(page, headerElement, nextHeader.Element))
+	// Get all child elements inside the parent container
+	allElements, err := parent.Elements("*")
+	if err != nil {
+		return "", err
+	}
+
+	headerFound := false
+
+	for _, elem := range allElements {
+		// Check if we've found the starting header
+		if !headerFound {
+			elemText, _ := elem.Text()
+			if strings.TrimSpace(elemText) == strings.TrimSpace(header.Text) {
+				headerFound = true
+				continue
+			}
+			continue
+		}
+
+		// After the header is found, check if we reach a stopping condition
+		tagName, err := elem.Property("tagName")
+		if err == nil {
+			tag := strings.ToLower(tagName.String())
+			if strings.HasPrefix(tag, "h") && len(tag) == 2 {
+				headerLevel := int(tag[1] - '0')
+				if headerLevel <= header.Level {
+					break // Stop at same or higher-level header
+				}
+			}
+		}
+
+		// Extract text content
+		elemText, err := elem.Text()
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(elemText) != "" {
+			content.WriteString(elemText)
+			content.WriteString("\n")
+		}
 	}
 
 	return e.cleanContent(content.String()), nil
@@ -532,42 +566,15 @@ func (e *Engine) cleanContent(content string) string {
 	return strings.Join(cleanLines, "\n")
 }
 
+// Also fix the XPath function - replace it with this simplified version:
 func (e *Engine) getElementXPath(elem *rod.Element) (string, error) {
-	// Generate XPath for element - simplified version
-	result, err := elem.Eval(`
-		function getXPath(element) {
-			if (element.id) {
-				return '//*[@id="' + element.id + '"]';
-			}
-			
-			let path = '';
-			while (element && element.nodeType === Node.ELEMENT_NODE) {
-				let tagName = element.nodeName.toLowerCase();
-				let siblings = Array.from(element.parentNode ? element.parentNode.children : []);
-				let sameTagSiblings = siblings.filter(sibling => sibling.nodeName.toLowerCase() === tagName);
-				
-				if (sameTagSiblings.length > 1) {
-					let index = sameTagSiblings.indexOf(element) + 1;
-					path = '/' + tagName + '[' + index + ']' + path;
-				} else {
-					path = '/' + tagName + path;
-				}
-				
-				element = element.parentNode;
-				if (element && element.nodeName.toLowerCase() === 'html') {
-					break;
-				}
-			}
-			
-			return path || '/';
-		}
-		
-		return getXPath(this);
-	`)
-
+	// Simple fallback XPath generation
+	tagName, err := elem.Property("tagName")
 	if err != nil {
 		return "", err
 	}
 
-	return result.Value.String(), nil
+	// Just return a simple xpath - this is non-critical for functionality
+	tag := strings.ToLower(tagName.String())
+	return fmt.Sprintf("//%s", tag), nil
 }

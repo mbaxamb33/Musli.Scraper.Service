@@ -37,6 +37,7 @@ func NewJobService(db *storage.Database, scraperEngine *scraper.Engine, cfg *con
 }
 
 // CreateScrapingJob creates a new scraping job
+// CreateScrapingJob creates a new scraping job
 func (js *JobService) CreateScrapingJob(ctx context.Context, req models.ScrapingJobRequest) (*models.ScrapingJob, error) {
 	// Generate unique job ID
 	jobID := uuid.New().String()
