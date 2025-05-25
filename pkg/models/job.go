@@ -10,6 +10,7 @@ type ScrapingJobRequest struct {
 	URL          string                 `json:"url" binding:"required"`
 	DatasourceID int32                  `json:"datasource_id,omitempty"`
 	CallbackURL  string                 `json:"callback_url,omitempty"`
+	Priority     int                    `json:"priority,omitempty"` // 0-9, higher = more urgent
 	Options      ScrapingOptions        `json:"options,omitempty"`
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
@@ -19,12 +20,19 @@ type ScrapingOptions struct {
 	WaitForJS       bool          `json:"wait_for_js"`
 	Timeout         time.Duration `json:"timeout"`
 	MaxDepth        int           `json:"max_depth"`
+	Depth           int           `json:"depth"` // Current crawl depth
 	FollowLinks     bool          `json:"follow_links"`
 	RespectRobots   bool          `json:"respect_robots"`
 	UserAgent       string        `json:"user_agent,omitempty"`
 	WaitForSelector string        `json:"wait_for_selector,omitempty"`
 	ScrollToBottom  bool          `json:"scroll_to_bottom"`
 	Screenshot      bool          `json:"screenshot"`
+
+	// Crawling options
+	MaxPages        int      `json:"max_pages,omitempty"`        // Maximum pages to crawl
+	SameDomainOnly  bool     `json:"same_domain_only"`           // Only crawl within same domain
+	IncludePatterns []string `json:"include_patterns,omitempty"` // URL patterns to include
+	ExcludePatterns []string `json:"exclude_patterns,omitempty"` // URL patterns to exclude
 }
 
 // ScrapingJob represents a scraping job in the database
@@ -94,4 +102,13 @@ type JobMetrics struct {
 	FailedJobs        int64         `json:"failed_jobs"`
 	SuccessRate       float64       `json:"success_rate"`
 	AvgProcessingTime time.Duration `json:"avg_processing_time"`
+}
+
+// QueueStatus represents the status of the job queue
+type QueueStatus struct {
+	Available    bool   `json:"available"`
+	QueueSize    int    `json:"queue_size,omitempty"`
+	ActiveJobs   int    `json:"active_jobs,omitempty"`
+	HealthStatus string `json:"health_status,omitempty"`
+	Message      string `json:"message,omitempty"`
 }

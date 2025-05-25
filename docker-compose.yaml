@@ -1,0 +1,133 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: musli_rabbitmq
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - musli_network
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:17-alpine
+    container_name: musli_postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: musli_scraper
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migration:/docker-entrypoint-initdb.d
+    networks:
+      - musli_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d musli_scraper"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis (Optional - for caching)
+  redis:
+    image: redis:7-alpine
+    container_name: musli_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - musli_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # Scraper Service (Optional - for containerized deployment)
+  scraper-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: musli_scraper_service
+    ports:
+      - "8081:8081"
+    environment:
+      # Server Configuration
+      PORT: 8081
+      ENVIRONMENT: development
+      
+      # Database Configuration
+      JOB_DB_TYPE: postgres
+      JOB_DB_URL: postgresql://root:secret@postgres:5432/musli_scraper?sslmode=disable
+      
+      # RabbitMQ Configuration
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      QUEUE_NAME: scraping_jobs
+      DEAD_LETTER_QUEUE: scraping_jobs_dlq
+      EXCHANGE_NAME: scraping_exchange
+      
+      # Worker Configuration
+      WORKER_COUNT: 3
+      JOB_TIMEOUT: 300s
+      
+      # Browser Configuration
+      BROWSER_HEADLESS: "true"
+      BROWSER_TIMEOUT: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - musli_network
+    restart: unless-stopped
+    profiles:
+      - full-stack
+
+  # RabbitMQ Management Tools (Optional)
+  rabbitmq-management:
+    image: rabbitmq:3-management
+    container_name: musli_rabbitmq_mgmt
+    ports:
+      - "15673:15672" # Alternative management UI port
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    networks:
+      - musli_network
+    profiles:
+      - management
+  
+networks:
+  musli_network:
+    driver: bridge
+    name: musli_network
+
+volumes:
+  rabbitmq_data:
+    name: musli_rabbitmq_data
+  postgres_data:
+    name: musli_postgres_data
+  redis_data:
+    name: musli_redis_data

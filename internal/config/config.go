@@ -19,8 +19,20 @@ type Config struct {
 	IdleTimeout  time.Duration `env:"IDLE_TIMEOUT" envDefault:"60s"`
 
 	// Database Configuration (for job storage only)
-	JobDBType string `env:"JOB_DB_TYPE" envDefault:"sqlite"` // sqlite, postgres
-	JobDBURL  string `env:"JOB_DB_URL" envDefault:"file:./data/jobs.db?cache=shared&mode=rwc"`
+	JobDBType string `env:"JOB_DB_TYPE" envDefault:"postgres"` // sqlite, postgres
+	JobDBURL  string `env:"JOB_DB_URL" envDefault:"postgresql://root:secret@localhost:5433/musli_scraper?sslmode=disable"`
+
+	// RabbitMQ Configuration
+	RabbitMQURL     string `env:"RABBITMQ_URL" envDefault:"amqp://guest:guest@localhost:5672/"`
+	QueueName       string `env:"QUEUE_NAME" envDefault:"scraping_jobs"`
+	DeadLetterQueue string `env:"DEAD_LETTER_QUEUE" envDefault:"scraping_jobs_dlq"`
+	ExchangeName    string `env:"EXCHANGE_NAME" envDefault:"scraping_exchange"`
+	QueueMaxRetries int    `env:"QUEUE_MAX_RETRIES" envDefault:"3"`
+
+	// Queue Configuration
+	QueueDurable    bool `env:"QUEUE_DURABLE" envDefault:"true"`
+	QueueAutoDelete bool `env:"QUEUE_AUTO_DELETE" envDefault:"false"`
+	QueueExclusive  bool `env:"QUEUE_EXCLUSIVE" envDefault:"false"`
 
 	// Browser/Rod Configuration
 	BrowserHeadless       bool          `env:"BROWSER_HEADLESS" envDefault:"true"`
@@ -119,6 +131,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("JOB_DB_URL cannot be empty")
 	}
 
+	if c.RabbitMQURL == "" {
+		return fmt.Errorf("RABBITMQ_URL cannot be empty")
+	}
+
+	if c.QueueName == "" {
+		return fmt.Errorf("QUEUE_NAME cannot be empty")
+	}
+
+	if c.ExchangeName == "" {
+		return fmt.Errorf("EXCHANGE_NAME cannot be empty")
+	}
+
 	if c.MaxConcurrency < 1 {
 		return fmt.Errorf("MAX_CONCURRENCY must be at least 1")
 	}
@@ -141,6 +165,14 @@ func (c *Config) Validate() error {
 
 	if c.MaxNestingLevel < 1 || c.MaxNestingLevel > 10 {
 		return fmt.Errorf("MAX_NESTING_LEVEL must be between 1 and 10")
+	}
+
+	if c.QueueMaxRetries < 0 {
+		return fmt.Errorf("QUEUE_MAX_RETRIES cannot be negative")
+	}
+
+	if c.MaxJobRetries < 0 {
+		return fmt.Errorf("MAX_JOB_RETRIES cannot be negative")
 	}
 
 	return nil
@@ -166,4 +198,19 @@ func (c *Config) GetDSN() string {
 	default:
 		return c.JobDBURL
 	}
+}
+
+// GetRabbitMQConfig returns RabbitMQ configuration for easier access
+func (c *Config) GetRabbitMQConfig() (url, queueName, dlqName, exchangeName string, maxRetries int) {
+	return c.RabbitMQURL, c.QueueName, c.DeadLetterQueue, c.ExchangeName, c.QueueMaxRetries
+}
+
+// GetWorkerConfig returns worker configuration for easier access
+func (c *Config) GetWorkerConfig() (count int, timeout time.Duration, maxRetries int, shutdownTimeout time.Duration) {
+	return c.WorkerCount, c.JobTimeout, c.MaxJobRetries, c.WorkerShutdownTimeout
+}
+
+// GetBrowserConfig returns browser configuration for easier access
+func (c *Config) GetBrowserConfig() (headless bool, timeout time.Duration, userAgent string, width, height int) {
+	return c.BrowserHeadless, c.BrowserTimeout, c.BrowserUserAgent, c.BrowserViewportWidth, c.BrowserViewportHeight
 }

@@ -1,4 +1,4 @@
-// internal/scraper/engine.go
+// internal/scraper/engine.go - Updated with crawling support
 package scraper
 
 import (
@@ -63,8 +63,20 @@ func (e *Engine) Close() error {
 	return nil
 }
 
-// ScrapePage scrapes a single page and extracts module title pairs
+// ScrapePage is the main entry point that handles both single-page and multi-page scraping
+
 func (e *Engine) ScrapePage(ctx context.Context, url string, options models.ScrapingOptions) (*models.ScrapingResults, error) {
+	// If depth is specified and > 0, perform multi-page crawling
+	if options.Depth > 0 || options.MaxPages > 1 {
+		return e.CrawlPages(ctx, url, options)
+	}
+
+	// Otherwise, perform single-page scraping (existing functionality)
+	return e.scrapeSinglePageLegacy(ctx, url, options)
+}
+
+// scrapeSinglePageLegacy is the original ScrapePage method renamed for single-page scraping
+func (e *Engine) scrapeSinglePageLegacy(ctx context.Context, url string, options models.ScrapingOptions) (*models.ScrapingResults, error) {
 	startTime := time.Now()
 
 	e.logger.Info("Starting page scraping",
@@ -78,27 +90,9 @@ func (e *Engine) ScrapePage(ctx context.Context, url string, options models.Scra
 	}
 	defer page.Close()
 
-	// Set viewport
-	if err := page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-		Width:  int(e.config.BrowserViewportWidth),
-		Height: int(e.config.BrowserViewportHeight),
-	}); err != nil {
-		e.logger.Warn("Failed to set viewport", zap.Error(err))
-	}
-
-	// Set user agent if specified
-	if options.UserAgent != "" {
-		if err := page.SetUserAgent(&proto.NetworkSetUserAgentOverride{
-			UserAgent: options.UserAgent,
-		}); err != nil {
-			e.logger.Warn("Failed to set user agent", zap.Error(err))
-		}
-	} else if e.config.BrowserUserAgent != "" {
-		if err := page.SetUserAgent(&proto.NetworkSetUserAgentOverride{
-			UserAgent: e.config.BrowserUserAgent,
-		}); err != nil {
-			e.logger.Warn("Failed to set default user agent", zap.Error(err))
-		}
+	// Configure page
+	if err := e.configurePage(page, options); err != nil {
+		return nil, fmt.Errorf("failed to configure page: %w", err)
 	}
 
 	// Navigate to URL with timeout
@@ -168,6 +162,13 @@ func (e *Engine) ScrapePage(ctx context.Context, url string, options models.Scra
 		return nil, fmt.Errorf("failed to extract module title pairs: %w", err)
 	}
 
+	// Add source URL to modules for consistency
+	for i := range modulePairs {
+		modulePairs[i].SourceURL = url
+		modulePairs[i].SourceTitle = metadata.Title
+		modulePairs[i].SourceDepth = 0
+	}
+
 	// Calculate processing stats
 	processingTime := time.Since(startTime)
 	contentLength := e.calculateContentLength(modulePairs)
@@ -184,6 +185,8 @@ func (e *Engine) ScrapePage(ctx context.Context, url string, options models.Scra
 		NetworkRequests:   0,            // Would need network monitoring
 		ResourcesLoaded:   0,            // Would need resource monitoring
 		ErrorsEncountered: 0,            // Track errors during processing
+		PagesProcessed:    1,            // Single page
+		CrawlDepth:        0,            // No crawling
 	}
 
 	results := &models.ScrapingResults{

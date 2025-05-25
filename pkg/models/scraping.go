@@ -14,6 +14,7 @@ type ScrapingResults struct {
 	ModulePairs     []ModuleTitlePair `json:"module_pairs"`
 	Metadata        PageMetadata      `json:"metadata"`
 	ProcessingStats ProcessingStats   `json:"processing_stats"`
+	CrawlResults    *CrawlResults     `json:"crawl_results,omitempty"` // Only present for multi-page crawls
 }
 
 // ModuleTitlePair represents a structured content module with its title
@@ -30,6 +31,11 @@ type ModuleTitlePair struct {
 	SubModules         []ModuleTitlePair `json:"sub_modules,omitempty"` // Nested modules
 	CrossReferences    []CrossReference  `json:"cross_references,omitempty"`
 	ExtractedAt        time.Time         `json:"extracted_at"`
+
+	// New fields for crawling support
+	SourceURL   string `json:"source_url,omitempty"`   // URL where this module was found
+	SourceTitle string `json:"source_title,omitempty"` // Title of the source page
+	SourceDepth int    `json:"source_depth,omitempty"` // Crawl depth where this was found
 }
 
 // PageMetadata contains comprehensive page-level information
@@ -78,6 +84,10 @@ type ProcessingStats struct {
 	NetworkRequests   int           `json:"network_requests"`
 	ResourcesLoaded   int           `json:"resources_loaded"`
 	ErrorsEncountered int           `json:"errors_encountered"`
+
+	// New fields for crawling support
+	PagesProcessed int `json:"pages_processed"` // Total pages processed
+	CrawlDepth     int `json:"crawl_depth"`     // Maximum depth reached
 }
 
 // ExtractionConfig contains configuration for the extraction process
@@ -135,4 +145,24 @@ func DefaultExtractionConfig() ExtractionConfig {
 		SimilarityThreshold:     0.8,
 		EnableDeduplication:     true,
 	}
+}
+
+// CrawlResults contains information about a multi-page crawl
+type CrawlResults struct {
+	TotalPagesFound   int           `json:"total_pages_found"`
+	TotalPagesScraped int           `json:"total_pages_scraped"`
+	MaxDepthReached   int           `json:"max_depth_reached"`
+	CrawlDuration     time.Duration `json:"crawl_duration"`
+	PagesSummary      []PageSummary `json:"pages_summary"`
+}
+
+// PageSummary contains summary information about a scraped page
+type PageSummary struct {
+	URL         string    `json:"url"`
+	Title       string    `json:"title"`
+	ModuleCount int       `json:"module_count"`
+	Depth       int       `json:"depth"`
+	ScrapedAt   time.Time `json:"scraped_at"`
+	Success     bool      `json:"success"`
+	Error       string    `json:"error,omitempty"`
 }

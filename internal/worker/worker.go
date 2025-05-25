@@ -1,341 +1,591 @@
-// internal/worker/worker.go
+// internal/worker/rabbitmq_worker.go
 package worker
 
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/mbaxamb3/nusli/scraper-service/internal/config"
+	"github.com/mbaxamb3/nusli/scraper-service/internal/queue"
 	"github.com/mbaxamb3/nusli/scraper-service/internal/services"
 	"go.uber.org/zap"
 )
 
-type Worker struct {
-	id         int
-	jobService *services.JobService
-	config     *config.Config
-	logger     *zap.Logger
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         *sync.WaitGroup
+// RabbitMQWorkerPool manages multiple RabbitMQ workers
+type RabbitMQWorkerPool struct {
+	workers          []*RabbitMQWorker
+	queueManager     *queue.RabbitMQManager
+	jobService       *services.JobService
+	config           *config.Config
+	logger           *zap.Logger
+	ctx              context.Context
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	healthChecker    *HealthChecker
+	metricsCollector *WorkerMetrics
+
+	// Worker pool state
+	isRunning bool
+	startTime time.Time
+	mu        sync.RWMutex
 }
 
-type WorkerPool struct {
-	workers    []*Worker
-	jobService *services.JobService
-	config     *config.Config
-	logger     *zap.Logger
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
+// RabbitMQWorker represents a single worker that processes jobs from RabbitMQ
+type RabbitMQWorker struct {
+	id           int
+	queueManager *queue.RabbitMQManager
+	jobService   *services.JobService
+	config       *config.Config
+	logger       *zap.Logger
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           *sync.WaitGroup
+
+	// Worker state
+	isActive            bool
+	lastJobTime         time.Time
+	jobsProcessed       int64
+	jobsSucceeded       int64
+	jobsFailed          int64
+	totalProcessingTime time.Duration
+	mu                  sync.RWMutex
 }
 
-// NewWorkerPool creates a new worker pool
-func NewWorkerPool(jobService *services.JobService, cfg *config.Config, logger *zap.Logger) *WorkerPool {
+// WorkerMetrics collects metrics from all workers
+type WorkerMetrics struct {
+	mu                  sync.RWMutex
+	totalJobs           int64
+	successfulJobs      int64
+	failedJobs          int64
+	totalProcessingTime time.Duration
+	activeWorkers       int
+	startTime           time.Time
+}
+
+// HealthChecker monitors worker pool health
+type HealthChecker struct {
+	pool          *RabbitMQWorkerPool
+	checkInterval time.Duration
+	logger        *zap.Logger
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+}
+
+// WorkerStatus represents the status of a worker
+type WorkerStatus struct {
+	ID                int           `json:"id"`
+	IsActive          bool          `json:"is_active"`
+	LastJobTime       time.Time     `json:"last_job_time"`
+	JobsProcessed     int64         `json:"jobs_processed"`
+	JobsSucceeded     int64         `json:"jobs_succeeded"`
+	JobsFailed        int64         `json:"jobs_failed"`
+	SuccessRate       float64       `json:"success_rate"`
+	AvgProcessingTime time.Duration `json:"avg_processing_time"`
+}
+
+// PoolStatus represents the overall status of the worker pool
+type PoolStatus struct {
+	IsRunning          bool           `json:"is_running"`
+	WorkerCount        int            `json:"worker_count"`
+	ActiveWorkers      int            `json:"active_workers"`
+	StartTime          time.Time      `json:"start_time"`
+	Uptime             time.Duration  `json:"uptime"`
+	TotalJobs          int64          `json:"total_jobs"`
+	SuccessfulJobs     int64          `json:"successful_jobs"`
+	FailedJobs         int64          `json:"failed_jobs"`
+	OverallSuccessRate float64        `json:"overall_success_rate"`
+	AvgProcessingTime  time.Duration  `json:"avg_processing_time"`
+	Workers            []WorkerStatus `json:"workers"`
+	QueueSize          int            `json:"queue_size,omitempty"`
+	MemoryUsage        uint64         `json:"memory_usage_bytes"`
+	GoroutineCount     int            `json:"goroutine_count"`
+}
+
+// NewRabbitMQWorkerPool creates a new RabbitMQ worker pool
+func NewRabbitMQWorkerPool(jobService *services.JobService, queueManager *queue.RabbitMQManager,
+	cfg *config.Config, logger *zap.Logger) *RabbitMQWorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &WorkerPool{
-		workers:    make([]*Worker, 0, cfg.WorkerCount),
-		jobService: jobService,
-		config:     cfg,
-		logger:     logger,
-		ctx:        ctx,
-		cancel:     cancel,
+	pool := &RabbitMQWorkerPool{
+		workers:      make([]*RabbitMQWorker, 0, cfg.WorkerCount),
+		queueManager: queueManager,
+		jobService:   jobService,
+		config:       cfg,
+		logger:       logger,
+		ctx:          ctx,
+		cancel:       cancel,
+		metricsCollector: &WorkerMetrics{
+			startTime: time.Now(),
+		},
 	}
+
+	// Initialize health checker
+	pool.healthChecker = NewHealthChecker(pool, 30*time.Second, logger)
+
+	return pool
 }
 
-// Start starts the worker pool
-func (wp *WorkerPool) Start() {
-	wp.logger.Info("Starting worker pool", zap.Int("worker_count", wp.config.WorkerCount))
+// Start starts the RabbitMQ worker pool
+func (rwp *RabbitMQWorkerPool) Start() error {
+	rwp.mu.Lock()
+	defer rwp.mu.Unlock()
 
-	for i := 0; i < wp.config.WorkerCount; i++ {
-		worker := wp.createWorker(i)
-		wp.workers = append(wp.workers, worker)
-		wp.wg.Add(1)
+	if rwp.isRunning {
+		return fmt.Errorf("worker pool is already running")
+	}
+
+	rwp.logger.Info("Starting RabbitMQ worker pool",
+		zap.Int("worker_count", rwp.config.WorkerCount),
+		zap.String("queue_name", rwp.config.QueueName))
+
+	rwp.startTime = time.Now()
+	rwp.isRunning = true
+
+	// Create and start workers
+	for i := 0; i < rwp.config.WorkerCount; i++ {
+		worker := rwp.createWorker(i)
+		rwp.workers = append(rwp.workers, worker)
+		rwp.wg.Add(1)
 		go worker.run()
 	}
 
-	wp.logger.Info("Worker pool started successfully")
+	// Start health checker
+	go rwp.healthChecker.Start()
+
+	// Start metrics collection
+	go rwp.collectMetrics()
+
+	rwp.logger.Info("RabbitMQ worker pool started successfully",
+		zap.Int("active_workers", len(rwp.workers)))
+
+	return nil
 }
 
-// Stop stops the worker pool gracefully
-func (wp *WorkerPool) Stop() {
-	wp.logger.Info("Stopping worker pool...")
+// Stop stops the RabbitMQ worker pool gracefully
+func (rwp *RabbitMQWorkerPool) Stop() error {
+	rwp.mu.Lock()
+	defer rwp.mu.Unlock()
+
+	if !rwp.isRunning {
+		return fmt.Errorf("worker pool is not running")
+	}
+
+	rwp.logger.Info("Stopping RabbitMQ worker pool...",
+		zap.Int("worker_count", len(rwp.workers)))
+
+	// Stop health checker first
+	rwp.healthChecker.Stop()
 
 	// Cancel context to signal workers to stop
-	wp.cancel()
+	rwp.cancel()
 
 	// Wait for all workers to finish with timeout
 	done := make(chan struct{})
 	go func() {
-		wp.wg.Wait()
+		rwp.wg.Wait()
 		close(done)
 	}()
 
 	select {
 	case <-done:
-		wp.logger.Info("All workers stopped gracefully")
-	case <-time.After(wp.config.WorkerShutdownTimeout):
-		wp.logger.Warn("Worker shutdown timeout exceeded")
+		rwp.logger.Info("All RabbitMQ workers stopped gracefully")
+	case <-time.After(rwp.config.WorkerShutdownTimeout):
+		rwp.logger.Warn("RabbitMQ worker shutdown timeout exceeded",
+			zap.Duration("timeout", rwp.config.WorkerShutdownTimeout))
+	}
+
+	rwp.isRunning = false
+	rwp.logger.Info("RabbitMQ worker pool stopped")
+
+	return nil
+}
+
+// GetStatus returns the current status of the worker pool
+func (rwp *RabbitMQWorkerPool) GetStatus() *PoolStatus {
+	rwp.mu.RLock()
+	defer rwp.mu.RUnlock()
+
+	status := &PoolStatus{
+		IsRunning:      rwp.isRunning,
+		WorkerCount:    len(rwp.workers),
+		StartTime:      rwp.startTime,
+		GoroutineCount: runtime.NumGoroutine(),
+	}
+
+	if rwp.isRunning {
+		status.Uptime = time.Since(rwp.startTime)
+	}
+
+	// Collect metrics
+	rwp.metricsCollector.mu.RLock()
+	status.TotalJobs = rwp.metricsCollector.totalJobs
+	status.SuccessfulJobs = rwp.metricsCollector.successfulJobs
+	status.FailedJobs = rwp.metricsCollector.failedJobs
+	status.ActiveWorkers = rwp.metricsCollector.activeWorkers
+	if rwp.metricsCollector.totalJobs > 0 {
+		status.OverallSuccessRate = float64(rwp.metricsCollector.successfulJobs) / float64(rwp.metricsCollector.totalJobs) * 100
+	}
+	if rwp.metricsCollector.successfulJobs > 0 {
+		status.AvgProcessingTime = rwp.metricsCollector.totalProcessingTime / time.Duration(rwp.metricsCollector.successfulJobs)
+	}
+	rwp.metricsCollector.mu.RUnlock()
+
+	// Get individual worker statuses
+	status.Workers = make([]WorkerStatus, len(rwp.workers))
+	for i, worker := range rwp.workers {
+		status.Workers[i] = worker.getStatus()
+	}
+
+	// Get queue size if available
+	if queueSize, err := rwp.queueManager.GetQueueInfo(); err == nil {
+		status.QueueSize = queueSize
+	}
+
+	// Get memory stats
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	status.MemoryUsage = memStats.Alloc
+
+	return status
+}
+
+// createWorker creates a new RabbitMQ worker
+func (rwp *RabbitMQWorkerPool) createWorker(id int) *RabbitMQWorker {
+	ctx, cancel := context.WithCancel(rwp.ctx)
+
+	return &RabbitMQWorker{
+		id:           id,
+		queueManager: rwp.queueManager,
+		jobService:   rwp.jobService,
+		config:       rwp.config,
+		logger:       rwp.logger.With(zap.Int("worker_id", id)),
+		ctx:          ctx,
+		cancel:       cancel,
+		wg:           &rwp.wg,
+		lastJobTime:  time.Now(),
 	}
 }
 
-// createWorker creates a new worker instance
-func (wp *WorkerPool) createWorker(id int) *Worker {
-	ctx, cancel := context.WithCancel(wp.ctx)
-
-	return &Worker{
-		id:         id,
-		jobService: wp.jobService,
-		config:     wp.config,
-		logger:     wp.logger.With(zap.Int("worker_id", id)),
-		ctx:        ctx,
-		cancel:     cancel,
-		wg:         &wp.wg,
-	}
-}
-
-// run is the main worker loop
-func (w *Worker) run() {
-	defer w.wg.Done()
-	defer w.cancel()
-
-	w.logger.Info("Worker started")
-
-	ticker := time.NewTicker(5 * time.Second) // Check for jobs every 5 seconds
+// collectMetrics periodically collects metrics from all workers
+func (rwp *RabbitMQWorkerPool) collectMetrics() {
+	ticker := time.NewTicker(10 * time.Second) // Collect metrics every 10 seconds
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
-			w.logger.Info("Worker stopping")
+		case <-rwp.ctx.Done():
 			return
 		case <-ticker.C:
-			if err := w.processNextJob(); err != nil {
-				w.logger.Error("Error processing job", zap.Error(err))
+			rwp.updateMetrics()
+		}
+	}
+}
+
+// updateMetrics updates the pool metrics by aggregating worker metrics
+func (rwp *RabbitMQWorkerPool) updateMetrics() {
+	rwp.metricsCollector.mu.Lock()
+	defer rwp.metricsCollector.mu.Unlock()
+
+	var totalJobs, successfulJobs, failedJobs int64
+	var totalProcessingTime time.Duration
+	var activeWorkers int
+
+	for _, worker := range rwp.workers {
+		worker.mu.RLock()
+		totalJobs += worker.jobsProcessed
+		successfulJobs += worker.jobsSucceeded
+		failedJobs += worker.jobsFailed
+		totalProcessingTime += worker.totalProcessingTime
+		if worker.isActive {
+			activeWorkers++
+		}
+		worker.mu.RUnlock()
+	}
+
+	rwp.metricsCollector.totalJobs = totalJobs
+	rwp.metricsCollector.successfulJobs = successfulJobs
+	rwp.metricsCollector.failedJobs = failedJobs
+	rwp.metricsCollector.totalProcessingTime = totalProcessingTime
+	rwp.metricsCollector.activeWorkers = activeWorkers
+}
+
+// RabbitMQWorker methods
+
+// run is the main RabbitMQ worker loop
+func (rw *RabbitMQWorker) run() {
+	defer rw.wg.Done()
+	defer rw.cancel()
+
+	rw.logger.Info("RabbitMQ worker started")
+	rw.setActive(true)
+
+	// Create job handler
+	handler := func(job queue.JobMessage) error {
+		return rw.processJob(job)
+	}
+
+	// Start consuming jobs
+	for {
+		select {
+		case <-rw.ctx.Done():
+			rw.logger.Info("RabbitMQ worker stopping due to context cancellation")
+			rw.setActive(false)
+			return
+		default:
+			// Consume jobs with timeout to allow for graceful shutdown
+			ctx, cancel := context.WithTimeout(rw.ctx, 30*time.Second)
+
+			rw.logger.Debug("Worker waiting for jobs...")
+			err := rw.queueManager.ConsumeJobs(ctx, handler)
+			cancel()
+
+			if err != nil {
+				if err == context.Canceled || err == context.DeadlineExceeded {
+					rw.logger.Debug("Worker consume operation canceled or timed out")
+					continue
+				} else {
+					rw.logger.Error("Worker consume error", zap.Error(err))
+					// Brief pause before retry to avoid tight error loops
+					select {
+					case <-time.After(5 * time.Second):
+					case <-rw.ctx.Done():
+						rw.setActive(false)
+						return
+					}
+				}
 			}
 		}
 	}
 }
 
-// processNextJob finds and processes the next pending job
-func (w *Worker) processNextJob() error {
-	// Get pending jobs (limit 1 for this worker)
-	jobs, err := w.jobService.GetJobsByStatus(w.ctx, "pending", 1, 0)
+// processJob processes a single job from the queue
+func (rw *RabbitMQWorker) processJob(job queue.JobMessage) error {
+	startTime := time.Now()
+
+	rw.logger.Info("Processing job from queue",
+		zap.String("job_id", job.JobID),
+		zap.String("url", job.URL),
+		zap.Int("retry", job.Retry),
+		zap.Int("priority", job.Priority))
+
+	rw.updateJobStats(startTime, false, false) // Mark as started
+
+	// Process the job using the job service
+	err := rw.jobService.ProcessJob(rw.ctx, job.JobID)
+
+	processingTime := time.Since(startTime)
+
 	if err != nil {
-		return err
-	}
-
-	if len(jobs) == 0 {
-		// No pending jobs
-		return nil
-	}
-
-	job := jobs[0]
-	w.logger.Info("Processing job", zap.String("job_id", job.ID), zap.String("url", job.URL))
-
-	// Process the job
-	if err := w.jobService.ProcessJob(w.ctx, job.ID); err != nil {
-		w.logger.Error("Failed to process job",
-			zap.String("job_id", job.ID),
+		rw.logger.Error("Failed to process job from queue",
+			zap.String("job_id", job.JobID),
+			zap.String("url", job.URL),
+			zap.Duration("processing_time", processingTime),
 			zap.Error(err))
-		return err
+
+		rw.updateJobStats(startTime, true, false) // Mark as failed
+		return fmt.Errorf("job processing failed: %w", err)
 	}
 
+	rw.logger.Info("Successfully processed job from queue",
+		zap.String("job_id", job.JobID),
+		zap.String("url", job.URL),
+		zap.Duration("processing_time", processingTime))
+
+	rw.updateJobStats(startTime, true, true) // Mark as completed successfully
 	return nil
 }
 
-// JobQueue represents a simple in-memory job queue
-type JobQueue struct {
-	jobs   chan string
-	logger *zap.Logger
-}
+// updateJobStats updates the worker's job processing statistics
+func (rw *RabbitMQWorker) updateJobStats(startTime time.Time, completed, succeeded bool) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
 
-// NewJobQueue creates a new job queue
-func NewJobQueue(size int, logger *zap.Logger) *JobQueue {
-	return &JobQueue{
-		jobs:   make(chan string, size),
-		logger: logger,
+	if completed {
+		rw.jobsProcessed++
+		rw.totalProcessingTime += time.Since(startTime)
+
+		if succeeded {
+			rw.jobsSucceeded++
+		} else {
+			rw.jobsFailed++
+		}
 	}
+
+	rw.lastJobTime = time.Now()
 }
 
-// Enqueue adds a job to the queue
-func (jq *JobQueue) Enqueue(jobID string) error {
-	select {
-	case jq.jobs <- jobID:
-		jq.logger.Debug("Job enqueued", zap.String("job_id", jobID))
-		return nil
-	default:
-		return ErrQueueFull
+// setActive sets the worker's active status
+func (rw *RabbitMQWorker) setActive(active bool) {
+	rw.mu.Lock()
+	defer rw.mu.Unlock()
+	rw.isActive = active
+}
+
+// getStatus returns the current status of the worker
+func (rw *RabbitMQWorker) getStatus() WorkerStatus {
+	rw.mu.RLock()
+	defer rw.mu.RUnlock()
+
+	status := WorkerStatus{
+		ID:            rw.id,
+		IsActive:      rw.isActive,
+		LastJobTime:   rw.lastJobTime,
+		JobsProcessed: rw.jobsProcessed,
+		JobsSucceeded: rw.jobsSucceeded,
+		JobsFailed:    rw.jobsFailed,
 	}
-}
 
-// Dequeue removes a job from the queue
-func (jq *JobQueue) Dequeue(ctx context.Context) (string, error) {
-	select {
-	case jobID := <-jq.jobs:
-		return jobID, nil
-	case <-ctx.Done():
-		return "", ctx.Err()
+	// Calculate success rate
+	if rw.jobsProcessed > 0 {
+		status.SuccessRate = float64(rw.jobsSucceeded) / float64(rw.jobsProcessed) * 100
 	}
+
+	// Calculate average processing time
+	if rw.jobsSucceeded > 0 {
+		status.AvgProcessingTime = rw.totalProcessingTime / time.Duration(rw.jobsSucceeded)
+	}
+
+	return status
 }
 
-// Size returns the current queue size
-func (jq *JobQueue) Size() int {
-	return len(jq.jobs)
-}
+// HealthChecker methods
 
-// Enhanced Worker with Queue Support
-type QueueWorker struct {
-	id         int
-	queue      *JobQueue
-	jobService *services.JobService
-	config     *config.Config
-	logger     *zap.Logger
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         *sync.WaitGroup
-}
-
-type QueueWorkerPool struct {
-	workers    []*QueueWorker
-	queue      *JobQueue
-	jobService *services.JobService
-	config     *config.Config
-	logger     *zap.Logger
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-}
-
-// NewQueueWorkerPool creates a worker pool with job queue
-func NewQueueWorkerPool(jobService *services.JobService, cfg *config.Config, logger *zap.Logger) *QueueWorkerPool {
+// NewHealthChecker creates a new health checker for the worker pool
+func NewHealthChecker(pool *RabbitMQWorkerPool, checkInterval time.Duration, logger *zap.Logger) *HealthChecker {
 	ctx, cancel := context.WithCancel(context.Background())
-	queue := NewJobQueue(1000, logger) // Queue can hold 1000 jobs
 
-	return &QueueWorkerPool{
-		workers:    make([]*QueueWorker, 0, cfg.WorkerCount),
-		queue:      queue,
-		jobService: jobService,
-		config:     cfg,
-		logger:     logger,
-		ctx:        ctx,
-		cancel:     cancel,
+	return &HealthChecker{
+		pool:          pool,
+		checkInterval: checkInterval,
+		logger:        logger.With(zap.String("component", "health_checker")),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
-// Start starts the queue-based worker pool
-func (qwp *QueueWorkerPool) Start() {
-	qwp.logger.Info("Starting queue worker pool", zap.Int("worker_count", qwp.config.WorkerCount))
+// Start starts the health checker
+func (hc *HealthChecker) Start() {
+	hc.wg.Add(1)
+	defer hc.wg.Done()
 
-	for i := 0; i < qwp.config.WorkerCount; i++ {
-		worker := qwp.createQueueWorker(i)
-		qwp.workers = append(qwp.workers, worker)
-		qwp.wg.Add(1)
-		go worker.run()
-	}
+	hc.logger.Info("Health checker started", zap.Duration("check_interval", hc.checkInterval))
 
-	qwp.logger.Info("Queue worker pool started successfully")
-}
-
-// Stop stops the queue worker pool
-func (qwp *QueueWorkerPool) Stop() {
-	qwp.logger.Info("Stopping queue worker pool...")
-	qwp.cancel()
-
-	done := make(chan struct{})
-	go func() {
-		qwp.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		qwp.logger.Info("All queue workers stopped gracefully")
-	case <-time.After(qwp.config.WorkerShutdownTimeout):
-		qwp.logger.Warn("Queue worker shutdown timeout exceeded")
-	}
-}
-
-// EnqueueJob adds a job to the processing queue
-func (qwp *QueueWorkerPool) EnqueueJob(jobID string) error {
-	return qwp.queue.Enqueue(jobID)
-}
-
-// GetQueueSize returns current queue size
-func (qwp *QueueWorkerPool) GetQueueSize() int {
-	return qwp.queue.Size()
-}
-
-// createQueueWorker creates a new queue worker
-func (qwp *QueueWorkerPool) createQueueWorker(id int) *QueueWorker {
-	ctx, cancel := context.WithCancel(qwp.ctx)
-
-	return &QueueWorker{
-		id:         id,
-		queue:      qwp.queue,
-		jobService: qwp.jobService,
-		config:     qwp.config,
-		logger:     qwp.logger.With(zap.Int("worker_id", id)),
-		ctx:        ctx,
-		cancel:     cancel,
-		wg:         &qwp.wg,
-	}
-}
-
-// run is the main queue worker loop
-func (qw *QueueWorker) run() {
-	defer qw.wg.Done()
-	defer qw.cancel()
-
-	qw.logger.Info("Queue worker started")
+	ticker := time.NewTicker(hc.checkInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-qw.ctx.Done():
-			qw.logger.Info("Queue worker stopping")
+		case <-hc.ctx.Done():
+			hc.logger.Info("Health checker stopping")
 			return
-		default:
-			if err := qw.processQueuedJob(); err != nil {
-				qw.logger.Error("Error processing queued job", zap.Error(err))
-				// Brief pause on error to avoid tight error loops
-				time.Sleep(time.Second)
-			}
+		case <-ticker.C:
+			hc.performHealthCheck()
 		}
 	}
 }
 
-// processQueuedJob processes a job from the queue
-func (qw *QueueWorker) processQueuedJob() error {
-	// Wait for job with timeout
-	ctx, cancel := context.WithTimeout(qw.ctx, 30*time.Second)
-	defer cancel()
+// Stop stops the health checker
+func (hc *HealthChecker) Stop() {
+	hc.logger.Info("Stopping health checker...")
+	hc.cancel()
+	hc.wg.Wait()
+	hc.logger.Info("Health checker stopped")
+}
 
-	jobID, err := qw.queue.Dequeue(ctx)
-	if err != nil {
-		if err == context.DeadlineExceeded {
-			// Timeout is normal, not an error
-			return nil
+// performHealthCheck performs a health check on the worker pool
+func (hc *HealthChecker) performHealthCheck() {
+	status := hc.pool.GetStatus()
+
+	// Check if any workers are stuck (haven't processed a job in a long time)
+	stuckWorkers := 0
+	for _, worker := range status.Workers {
+		if time.Since(worker.LastJobTime) > 5*time.Minute && worker.IsActive {
+			stuckWorkers++
 		}
-		return err
 	}
 
-	qw.logger.Info("Processing queued job", zap.String("job_id", jobID))
-
-	// Process the job
-	if err := qw.jobService.ProcessJob(qw.ctx, jobID); err != nil {
-		qw.logger.Error("Failed to process queued job",
-			zap.String("job_id", jobID),
-			zap.Error(err))
-		return err
+	// Log health status
+	if stuckWorkers > 0 {
+		hc.logger.Warn("Health check detected stuck workers",
+			zap.Int("stuck_workers", stuckWorkers),
+			zap.Int("total_workers", status.WorkerCount))
 	}
+
+	// Log overall metrics
+	hc.logger.Debug("Worker pool health check",
+		zap.Int("active_workers", status.ActiveWorkers),
+		zap.Int("total_workers", status.WorkerCount),
+		zap.Int64("total_jobs", status.TotalJobs),
+		zap.Float64("success_rate", status.OverallSuccessRate),
+		zap.Int("queue_size", status.QueueSize),
+		zap.Uint64("memory_usage_mb", status.MemoryUsage/1024/1024),
+		zap.Int("goroutines", status.GoroutineCount))
+
+	// Check memory usage and log warning if too high
+	memoryUsageMB := status.MemoryUsage / 1024 / 1024
+	if memoryUsageMB > 500 { // 500MB threshold
+		hc.logger.Warn("High memory usage detected",
+			zap.Uint64("memory_usage_mb", memoryUsageMB))
+	}
+
+	// Check goroutine count
+	if status.GoroutineCount > 100 { // 100 goroutines threshold
+		hc.logger.Warn("High goroutine count detected",
+			zap.Int("goroutine_count", status.GoroutineCount))
+	}
+}
+
+// RestartWorker restarts a specific worker (for future use)
+func (rwp *RabbitMQWorkerPool) RestartWorker(workerID int) error {
+	rwp.mu.Lock()
+	defer rwp.mu.Unlock()
+
+	if workerID < 0 || workerID >= len(rwp.workers) {
+		return fmt.Errorf("invalid worker ID: %d", workerID)
+	}
+
+	worker := rwp.workers[workerID]
+
+	rwp.logger.Info("Restarting worker", zap.Int("worker_id", workerID))
+
+	// Cancel the old worker
+	worker.cancel()
+
+	// Create a new worker
+	newWorker := rwp.createWorker(workerID)
+	rwp.workers[workerID] = newWorker
+
+	// Start the new worker
+	rwp.wg.Add(1)
+	go newWorker.run()
+
+	rwp.logger.Info("Worker restarted successfully", zap.Int("worker_id", workerID))
 
 	return nil
 }
 
-// Custom errors
-var (
-	ErrQueueFull = fmt.Errorf("job queue is full")
-)
+// Shutdown performs a graceful shutdown of the worker pool
+func (rwp *RabbitMQWorkerPool) Shutdown(ctx context.Context) error {
+	rwp.logger.Info("Initiating graceful shutdown of worker pool")
+
+	// Create a channel to signal completion
+	done := make(chan error, 1)
+
+	go func() {
+		done <- rwp.Stop()
+	}()
+
+	// Wait for shutdown or context timeout
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		rwp.logger.Warn("Shutdown timeout exceeded, forcing stop")
+		rwp.cancel() // Force cancel all workers
+		return ctx.Err()
+	}
+}
