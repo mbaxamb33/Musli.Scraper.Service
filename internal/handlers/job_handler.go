@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/mbaxamb3/nusli/scraper-service/internal/services"
 	"github.com/mbaxamb3/nusli/scraper-service/pkg/models"
@@ -220,12 +221,17 @@ func (h *JobHandler) parsePaginationParams(r *http.Request) (limit, offset int32
 }
 
 func extractJobID(path string) string {
-	// Extract job ID from paths like /api/jobs/{id} or /api/jobs/{id}/process
-	// Simple implementation - in production, use a proper router
-	parts := splitPath(path)
-	if len(parts) >= 3 && parts[1] == "api" && parts[2] == "jobs" {
-		if len(parts) >= 4 {
-			return parts[3]
+	// Handle paths like /api/jobs/{id} or /api/jobs/{id}/process
+	// Remove leading slash and split by slash
+	path = strings.TrimPrefix(path, "/")
+	parts := strings.Split(path, "/")
+
+	// Expected format: ["api", "jobs", "{id}"] or ["api", "jobs", "{id}", "process"]
+	if len(parts) >= 3 && parts[0] == "api" && parts[1] == "jobs" {
+		jobID := parts[2]
+		// Make sure we have a valid job ID (not empty)
+		if jobID != "" {
+			return jobID
 		}
 	}
 	return ""
