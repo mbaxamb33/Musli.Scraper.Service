@@ -13,7 +13,7 @@ type Querier interface {
 	CancelJob(ctx context.Context, id string) (ScrapingJobs, error)
 	CleanupOldJobs(ctx context.Context, createdAt time.Time) error
 	CompleteJob(ctx context.Context, arg CompleteJobParams) (ScrapingJobs, error)
-	CountJobsByStatus(ctx context.Context, status JobStatus) (int64, error)
+	CountJobsByStatus(ctx context.Context, status interface{}) (int64, error)
 	CountTotalJobs(ctx context.Context) (int64, error)
 	// db/query/scraping_jobs.sql
 	// SQLC queries for scraping jobs management

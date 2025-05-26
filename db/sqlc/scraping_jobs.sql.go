@@ -94,7 +94,7 @@ const CountJobsByStatus = `-- name: CountJobsByStatus :one
 SELECT COUNT(*) FROM scraping_jobs WHERE status = $1
 `
 
-func (q *Queries) CountJobsByStatus(ctx context.Context, status JobStatus) (int64, error) {
+func (q *Queries) CountJobsByStatus(ctx context.Context, status interface{}) (int64, error) {
 	row := q.db.QueryRow(ctx, CountJobsByStatus, status)
 	var count int64
 	err := row.Scan(&count)
@@ -128,7 +128,7 @@ type CreateScrapingJobParams struct {
 	CallbackUrl  pgtype.Text     `db:"callback_url" json:"callback_url"`
 	Options      json.RawMessage `db:"options" json:"options"`
 	Metadata     json.RawMessage `db:"metadata" json:"metadata"`
-	Status       JobStatus       `db:"status" json:"status"`
+	Status       interface{}     `db:"status" json:"status"`
 }
 
 // db/query/scraping_jobs.sql
@@ -361,9 +361,9 @@ type GetJobsForCleanupParams struct {
 }
 
 type GetJobsForCleanupRow struct {
-	ID        string    `db:"id" json:"id"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	Status    JobStatus `db:"status" json:"status"`
+	ID        string      `db:"id" json:"id"`
+	CreatedAt time.Time   `db:"created_at" json:"created_at"`
+	Status    interface{} `db:"status" json:"status"`
 }
 
 func (q *Queries) GetJobsForCleanup(ctx context.Context, arg GetJobsForCleanupParams) ([]GetJobsForCleanupRow, error) {
@@ -671,9 +671,9 @@ LIMIT $2 OFFSET $3
 `
 
 type ListScrapingJobsByStatusParams struct {
-	Status JobStatus `db:"status" json:"status"`
-	Limit  int32     `db:"limit" json:"limit"`
-	Offset int32     `db:"offset" json:"offset"`
+	Status interface{} `db:"status" json:"status"`
+	Limit  int32       `db:"limit" json:"limit"`
+	Offset int32       `db:"offset" json:"offset"`
 }
 
 func (q *Queries) ListScrapingJobsByStatus(ctx context.Context, arg ListScrapingJobsByStatusParams) ([]ScrapingJobs, error) {
@@ -857,7 +857,7 @@ RETURNING id, url, datasource_id, callback_url, options, metadata, status, progr
 
 type UpdateJobStatusParams struct {
 	ID       string      `db:"id" json:"id"`
-	Status   JobStatus   `db:"status" json:"status"`
+	Status   interface{} `db:"status" json:"status"`
 	Progress pgtype.Int4 `db:"progress" json:"progress"`
 }
 

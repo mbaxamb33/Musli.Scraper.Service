@@ -1,4 +1,4 @@
-// internal/worker/rabbitmq_worker.go
+// internal/worker/worker.go - Fixed to properly call JobService
 package worker
 
 import (
@@ -272,7 +272,7 @@ func (rwp *RabbitMQWorkerPool) createWorker(id int) *RabbitMQWorker {
 
 // collectMetrics periodically collects metrics from all workers
 func (rwp *RabbitMQWorkerPool) collectMetrics() {
-	ticker := time.NewTicker(10 * time.Second) // Collect metrics every 10 seconds
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -329,37 +329,13 @@ func (rw *RabbitMQWorker) run() {
 	}
 
 	// Start consuming jobs
-	for {
-		select {
-		case <-rw.ctx.Done():
-			rw.logger.Info("RabbitMQ worker stopping due to context cancellation")
-			rw.setActive(false)
-			return
-		default:
-			// Consume jobs with timeout to allow for graceful shutdown
-			ctx, cancel := context.WithTimeout(rw.ctx, 30*time.Second)
-
-			rw.logger.Debug("Worker waiting for jobs...")
-			err := rw.queueManager.ConsumeJobs(ctx, handler)
-			cancel()
-
-			if err != nil {
-				if err == context.Canceled || err == context.DeadlineExceeded {
-					rw.logger.Debug("Worker consume operation canceled or timed out")
-					continue
-				} else {
-					rw.logger.Error("Worker consume error", zap.Error(err))
-					// Brief pause before retry to avoid tight error loops
-					select {
-					case <-time.After(5 * time.Second):
-					case <-rw.ctx.Done():
-						rw.setActive(false)
-						return
-					}
-				}
-			}
-		}
+	err := rw.queueManager.ConsumeJobs(rw.ctx, handler)
+	if err != nil && err != context.Canceled {
+		rw.logger.Error("Worker stopped due to error", zap.Error(err))
 	}
+
+	rw.setActive(false)
+	rw.logger.Info("RabbitMQ worker stopped")
 }
 
 // processJob processes a single job from the queue
@@ -374,8 +350,8 @@ func (rw *RabbitMQWorker) processJob(job queue.JobMessage) error {
 
 	rw.updateJobStats(startTime, false, false) // Mark as started
 
-	// Process the job using the job service
-	err := rw.jobService.ProcessJob(rw.ctx, job.JobID)
+	// Process the job using the job service's new method
+	err := rw.jobService.ProcessJobFromQueue(rw.ctx, job.JobID)
 
 	processingTime := time.Since(startTime)
 
@@ -527,45 +503,16 @@ func (hc *HealthChecker) performHealthCheck() {
 
 	// Check memory usage and log warning if too high
 	memoryUsageMB := status.MemoryUsage / 1024 / 1024
-	if memoryUsageMB > 500 { // 500MB threshold
+	if memoryUsageMB > 500 {
 		hc.logger.Warn("High memory usage detected",
 			zap.Uint64("memory_usage_mb", memoryUsageMB))
 	}
 
 	// Check goroutine count
-	if status.GoroutineCount > 100 { // 100 goroutines threshold
+	if status.GoroutineCount > 100 {
 		hc.logger.Warn("High goroutine count detected",
 			zap.Int("goroutine_count", status.GoroutineCount))
 	}
-}
-
-// RestartWorker restarts a specific worker (for future use)
-func (rwp *RabbitMQWorkerPool) RestartWorker(workerID int) error {
-	rwp.mu.Lock()
-	defer rwp.mu.Unlock()
-
-	if workerID < 0 || workerID >= len(rwp.workers) {
-		return fmt.Errorf("invalid worker ID: %d", workerID)
-	}
-
-	worker := rwp.workers[workerID]
-
-	rwp.logger.Info("Restarting worker", zap.Int("worker_id", workerID))
-
-	// Cancel the old worker
-	worker.cancel()
-
-	// Create a new worker
-	newWorker := rwp.createWorker(workerID)
-	rwp.workers[workerID] = newWorker
-
-	// Start the new worker
-	rwp.wg.Add(1)
-	go newWorker.run()
-
-	rwp.logger.Info("Worker restarted successfully", zap.Int("worker_id", workerID))
-
-	return nil
 }
 
 // Shutdown performs a graceful shutdown of the worker pool

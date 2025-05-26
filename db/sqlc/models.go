@@ -5,80 +5,11 @@
 package db
 
 import (
-	"database/sql/driver"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
-
-type JobStatus string
-
-const (
-	JobStatusPending    JobStatus = "pending"
-	JobStatusProcessing JobStatus = "processing"
-	JobStatusCompleted  JobStatus = "completed"
-	JobStatusFailed     JobStatus = "failed"
-	JobStatusCanceled   JobStatus = "canceled"
-)
-
-func (e *JobStatus) Scan(src interface{}) error {
-	switch s := src.(type) {
-	case []byte:
-		*e = JobStatus(s)
-	case string:
-		*e = JobStatus(s)
-	default:
-		return fmt.Errorf("unsupported scan type for JobStatus: %T", src)
-	}
-	return nil
-}
-
-type NullJobStatus struct {
-	JobStatus JobStatus `json:"job_status"`
-	Valid     bool      `json:"valid"` // Valid is true if JobStatus is not NULL
-}
-
-// Scan implements the Scanner interface.
-func (ns *NullJobStatus) Scan(value interface{}) error {
-	if value == nil {
-		ns.JobStatus, ns.Valid = "", false
-		return nil
-	}
-	ns.Valid = true
-	return ns.JobStatus.Scan(value)
-}
-
-// Value implements the driver Valuer interface.
-func (ns NullJobStatus) Value() (driver.Value, error) {
-	if !ns.Valid {
-		return nil, nil
-	}
-	return string(ns.JobStatus), nil
-}
-
-func (e JobStatus) Valid() bool {
-	switch e {
-	case JobStatusPending,
-		JobStatusProcessing,
-		JobStatusCompleted,
-		JobStatusFailed,
-		JobStatusCanceled:
-		return true
-	}
-	return false
-}
-
-func AllJobStatusValues() []JobStatus {
-	return []JobStatus{
-		JobStatusPending,
-		JobStatusProcessing,
-		JobStatusCompleted,
-		JobStatusFailed,
-		JobStatusCanceled,
-	}
-}
 
 type JobMetrics struct {
 	TotalJobs                int64          `db:"total_jobs" json:"total_jobs"`
@@ -98,7 +29,7 @@ type ScrapingJobs struct {
 	CallbackUrl  pgtype.Text     `db:"callback_url" json:"callback_url"`
 	Options      json.RawMessage `db:"options" json:"options"`
 	Metadata     json.RawMessage `db:"metadata" json:"metadata"`
-	Status       JobStatus       `db:"status" json:"status"`
+	Status       interface{}     `db:"status" json:"status"`
 	Progress     pgtype.Int4     `db:"progress" json:"progress"`
 	StartedAt    time.Time       `db:"started_at" json:"started_at"`
 	CompletedAt  **time.Time     `db:"completed_at" json:"completed_at"`

@@ -2,8 +2,15 @@
 -- Job database schema for Musli.Scraper.Service
 -- This is a lightweight database for job management only
 
--- Create enum for job status
-CREATE TYPE job_status AS ENUM ('pending', 'processing', 'completed', 'failed', 'canceled');
+-- Create enum for job status if it doesn't already exist
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'job_status') THEN
+        CREATE TYPE job_status AS ENUM ('pending', 'processing', 'completed', 'failed', 'canceled');
+    END IF;
+END
+$$;
+
 
 -- Main scraping jobs table
 CREATE TABLE scraping_jobs (

@@ -134,6 +134,137 @@ func (js *JobService) CreateScrapingJob(ctx context.Context, req models.Scraping
 	return job, nil
 }
 
+// ProcessJobFromQueue processes a job from the queue (called by RabbitMQ workers)
+func (js *JobService) ProcessJobFromQueue(ctx context.Context, jobID string) error {
+	js.logger.Info("Processing job from queue", zap.String("job_id", jobID))
+
+	// Get job from database
+	dbJob, err := js.db.GetQueries().GetScrapingJob(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to get job: %w", err)
+	}
+
+	// Check if job is in pending status
+	if dbJob.Status != db.JobStatusPending {
+		js.logger.Warn("Job is not in pending status",
+			zap.String("job_id", jobID),
+			zap.String("status", string(dbJob.Status)))
+		return fmt.Errorf("job is not in pending status: %s", dbJob.Status)
+	}
+
+	// Start the job
+	_, err = js.db.GetQueries().StartJob(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to start job: %w", err)
+	}
+
+	js.logger.Info("Job marked as processing",
+		zap.String("job_id", jobID),
+		zap.String("url", dbJob.Url))
+
+	// Process the job synchronously
+	return js.executeJob(ctx, jobID, dbJob)
+}
+
+// executeJob performs the actual scraping work
+func (js *JobService) executeJob(ctx context.Context, jobID string, dbJob db.ScrapingJobs) error {
+	startTime := time.Now()
+
+	// Parse options
+	var options models.ScrapingOptions
+	if len(dbJob.Options) > 0 {
+		if err := json.Unmarshal(dbJob.Options, &options); err != nil {
+			js.logger.Error("Failed to parse job options",
+				zap.String("job_id", jobID),
+				zap.Error(err))
+			return js.failJob(ctx, jobID, fmt.Sprintf("Failed to parse options: %v", err))
+		}
+	}
+
+	// Set default timeout if not specified
+	if options.Timeout == 0 {
+		options.Timeout = js.config.BrowserTimeout
+	}
+
+	// Update progress
+	js.updateJobProgress(ctx, jobID, 10)
+
+	// Add processing timeout
+	processingCtx, cancel := context.WithTimeout(ctx, js.config.JobTimeout)
+	defer cancel()
+
+	// Perform scraping
+	results, err := js.scraper.ScrapePage(processingCtx, dbJob.Url, options)
+	if err != nil {
+		js.logger.Error("Failed to scrape page",
+			zap.String("job_id", jobID),
+			zap.String("url", dbJob.Url),
+			zap.Duration("processing_time", time.Since(startTime)),
+			zap.Error(err))
+		return js.failJob(ctx, jobID, err.Error())
+	}
+
+	// Update progress
+	js.updateJobProgress(ctx, jobID, 90)
+
+	// Convert results to JSON
+	resultsJSON, err := json.Marshal(results)
+	if err != nil {
+		js.logger.Error("Failed to marshal results",
+			zap.String("job_id", jobID),
+			zap.Error(err))
+		return js.failJob(ctx, jobID, fmt.Sprintf("Failed to marshal results: %v", err))
+	}
+
+	// Complete the job
+	_, err = js.db.GetQueries().CompleteJob(ctx, db.CompleteJobParams{
+		ID:      jobID,
+		Results: resultsJSON,
+	})
+	if err != nil {
+		js.logger.Error("Failed to complete job",
+			zap.String("job_id", jobID),
+			zap.Error(err))
+		return err
+	}
+
+	processingTime := time.Since(startTime)
+
+	js.logger.Info("Job completed successfully",
+		zap.String("job_id", jobID),
+		zap.String("url", dbJob.Url),
+		zap.Int("modules_extracted", len(results.ModulePairs)),
+		zap.Duration("processing_time", processingTime),
+		zap.Int("content_length", results.ProcessingStats.ContentLength))
+
+	// Send callback if configured
+	if dbJob.CallbackUrl.Valid && dbJob.CallbackUrl.String != "" {
+		go js.sendCallback(context.Background(), jobID, dbJob.CallbackUrl.String, results)
+	}
+
+	return nil
+}
+
+// ProcessJob is deprecated - use ProcessJobFromQueue instead
+// This method is kept for API compatibility but immediately returns
+func (js *JobService) ProcessJob(ctx context.Context, jobID string) error {
+	js.logger.Info("ProcessJob called - job will be processed by queue workers",
+		zap.String("job_id", jobID))
+
+	// Just verify the job exists and is in pending state
+	dbJob, err := js.db.GetQueries().GetScrapingJob(ctx, jobID)
+	if err != nil {
+		return fmt.Errorf("failed to get job: %w", err)
+	}
+
+	if dbJob.Status != db.JobStatusPending {
+		return fmt.Errorf("job is not in pending status: %s", dbJob.Status)
+	}
+
+	// Job will be processed by RabbitMQ workers
+	return nil
+}
+
 // GetScrapingJob retrieves a scraping job by ID
 func (js *JobService) GetScrapingJob(ctx context.Context, jobID string) (*models.ScrapingJob, error) {
 	js.logger.Debug("Getting scraping job", zap.String("job_id", jobID))
@@ -194,136 +325,6 @@ func (js *JobService) ListScrapingJobs(ctx context.Context, limit, offset int32)
 		zap.Int64("total_count", totalCount))
 
 	return response, nil
-}
-
-// ProcessJob processes a scraping job (called by workers)
-func (js *JobService) ProcessJob(ctx context.Context, jobID string) error {
-	js.logger.Info("Starting job processing", zap.String("job_id", jobID))
-
-	// Get job from database
-	dbJob, err := js.db.GetQueries().GetScrapingJob(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("failed to get job: %w", err)
-	}
-
-	// Check if job is in pending status
-	if dbJob.Status != db.JobStatusPending {
-		js.logger.Warn("Job is not in pending status",
-			zap.String("job_id", jobID),
-			zap.String("status", string(dbJob.Status)))
-		return fmt.Errorf("job is not in pending status: %s", dbJob.Status)
-	}
-
-	// Start the job
-	_, err = js.db.GetQueries().StartJob(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("failed to start job: %w", err)
-	}
-
-	js.logger.Info("Job marked as processing",
-		zap.String("job_id", jobID),
-		zap.String("url", dbJob.Url))
-
-	// Process in background
-	go js.processJobAsync(context.Background(), jobID, dbJob)
-
-	return nil
-}
-
-// processJobAsync processes a job asynchronously
-func (js *JobService) processJobAsync(ctx context.Context, jobID string, dbJob db.ScrapingJobs) {
-	startTime := time.Now()
-
-	defer func() {
-		if r := recover(); r != nil {
-			js.logger.Error("Job processing panicked",
-				zap.String("job_id", jobID),
-				zap.Any("panic", r),
-				zap.Duration("processing_time", time.Since(startTime)))
-
-			// Mark job as failed
-			js.failJob(ctx, jobID, fmt.Sprintf("Processing panicked: %v", r))
-		}
-	}()
-
-	js.logger.Info("Starting async job processing",
-		zap.String("job_id", jobID),
-		zap.String("url", dbJob.Url))
-
-	// Parse options
-	var options models.ScrapingOptions
-	if len(dbJob.Options) > 0 {
-		if err := json.Unmarshal(dbJob.Options, &options); err != nil {
-			js.logger.Error("Failed to parse job options",
-				zap.String("job_id", jobID),
-				zap.Error(err))
-			js.failJob(ctx, jobID, fmt.Sprintf("Failed to parse options: %v", err))
-			return
-		}
-	}
-
-	// Set default timeout if not specified
-	if options.Timeout == 0 {
-		options.Timeout = js.config.BrowserTimeout
-	}
-
-	// Update progress
-	js.updateJobProgress(ctx, jobID, 10)
-
-	// Add processing timeout
-	processingCtx, cancel := context.WithTimeout(ctx, js.config.JobTimeout)
-	defer cancel()
-
-	// Perform scraping
-	results, err := js.scraper.ScrapePage(processingCtx, dbJob.Url, options)
-	if err != nil {
-		js.logger.Error("Failed to scrape page",
-			zap.String("job_id", jobID),
-			zap.String("url", dbJob.Url),
-			zap.Duration("processing_time", time.Since(startTime)),
-			zap.Error(err))
-		js.failJob(ctx, jobID, err.Error())
-		return
-	}
-
-	// Update progress
-	js.updateJobProgress(ctx, jobID, 90)
-
-	// Convert results to JSON
-	resultsJSON, err := json.Marshal(results)
-	if err != nil {
-		js.logger.Error("Failed to marshal results",
-			zap.String("job_id", jobID),
-			zap.Error(err))
-		js.failJob(ctx, jobID, fmt.Sprintf("Failed to marshal results: %v", err))
-		return
-	}
-
-	// Complete the job
-	_, err = js.db.GetQueries().CompleteJob(ctx, db.CompleteJobParams{
-		ID:      jobID,
-		Results: resultsJSON,
-	})
-	if err != nil {
-		js.logger.Error("Failed to complete job",
-			zap.String("job_id", jobID),
-			zap.Error(err))
-		return
-	}
-
-	processingTime := time.Since(startTime)
-
-	js.logger.Info("Job completed successfully",
-		zap.String("job_id", jobID),
-		zap.String("url", dbJob.Url),
-		zap.Int("modules_extracted", len(results.ModulePairs)),
-		zap.Duration("processing_time", processingTime),
-		zap.Int("content_length", results.ProcessingStats.ContentLength))
-
-	// Send callback if configured
-	if dbJob.CallbackUrl.Valid && dbJob.CallbackUrl.String != "" {
-		go js.sendCallback(context.Background(), jobID, dbJob.CallbackUrl.String, results)
-	}
 }
 
 // GetJobsByStatus retrieves jobs by status
@@ -546,7 +547,7 @@ func (js *JobService) updateJobProgress(ctx context.Context, jobID string, progr
 	}
 }
 
-func (js *JobService) failJob(ctx context.Context, jobID, errorMsg string) {
+func (js *JobService) failJob(ctx context.Context, jobID, errorMsg string) error {
 	js.logger.Error("Marking job as failed",
 		zap.String("job_id", jobID),
 		zap.String("error", errorMsg))
@@ -560,6 +561,7 @@ func (js *JobService) failJob(ctx context.Context, jobID, errorMsg string) {
 			zap.String("job_id", jobID),
 			zap.Error(err))
 	}
+	return err
 }
 
 func (js *JobService) sendCallback(ctx context.Context, jobID, callbackURL string, results *models.ScrapingResults) {
