@@ -24,3 +24,7 @@ sql:
           - db_type: "job_status"
             go_type:
               type: "JobStatus"
+          - db_type: "timestamp"
+            go_type: "time.Time"
+          - db_type: "timestamptz" 
+            go_type: "time.Time"

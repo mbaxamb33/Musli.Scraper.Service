@@ -68,12 +68,20 @@ func main() {
 			logger.Info("Found pending jobs", zap.Int("count", len(jobs)))
 
 			for _, job := range jobs {
+				// Handle timestamp conversion
+				var createdAt time.Time
+				if job.CreatedAt.Valid {
+					createdAt = job.CreatedAt.Time
+				} else {
+					createdAt = time.Now()
+				}
+
 				// Create job message for RabbitMQ
 				jobMsg := queue.JobMessage{
 					JobID:     job.ID,
 					URL:       job.Url,
 					Priority:  5, // Default priority
-					CreatedAt: job.CreatedAt,
+					CreatedAt: createdAt,
 				}
 
 				// Publish to RabbitMQ
