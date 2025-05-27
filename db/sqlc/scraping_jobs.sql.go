@@ -7,8 +7,6 @@ package db
 
 import (
 	"context"
-	"encoding/json"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -49,7 +47,7 @@ WHERE created_at < $1
 AND status IN ('completed', 'failed', 'canceled')
 `
 
-func (q *Queries) CleanupOldJobs(ctx context.Context, createdAt time.Time) error {
+func (q *Queries) CleanupOldJobs(ctx context.Context, createdAt pgtype.Timestamp) error {
 	_, err := q.db.Exec(ctx, CleanupOldJobs, createdAt)
 	return err
 }
@@ -63,8 +61,8 @@ RETURNING id, url, datasource_id, callback_url, options, metadata, status, progr
 `
 
 type CompleteJobParams struct {
-	ID      string          `db:"id" json:"id"`
-	Results json.RawMessage `db:"results" json:"results"`
+	ID      string `db:"id" json:"id"`
+	Results []byte `db:"results" json:"results"`
 }
 
 func (q *Queries) CompleteJob(ctx context.Context, arg CompleteJobParams) (ScrapingJobs, error) {
@@ -94,7 +92,7 @@ const CountJobsByStatus = `-- name: CountJobsByStatus :one
 SELECT COUNT(*) FROM scraping_jobs WHERE status = $1
 `
 
-func (q *Queries) CountJobsByStatus(ctx context.Context, status interface{}) (int64, error) {
+func (q *Queries) CountJobsByStatus(ctx context.Context, status JobStatus) (int64, error) {
 	row := q.db.QueryRow(ctx, CountJobsByStatus, status)
 	var count int64
 	err := row.Scan(&count)
@@ -122,13 +120,13 @@ INSERT INTO scraping_jobs (
 `
 
 type CreateScrapingJobParams struct {
-	ID           string          `db:"id" json:"id"`
-	Url          string          `db:"url" json:"url"`
-	DatasourceID pgtype.Int4     `db:"datasource_id" json:"datasource_id"`
-	CallbackUrl  pgtype.Text     `db:"callback_url" json:"callback_url"`
-	Options      json.RawMessage `db:"options" json:"options"`
-	Metadata     json.RawMessage `db:"metadata" json:"metadata"`
-	Status       interface{}     `db:"status" json:"status"`
+	ID           string      `db:"id" json:"id"`
+	Url          string      `db:"url" json:"url"`
+	DatasourceID pgtype.Int4 `db:"datasource_id" json:"datasource_id"`
+	CallbackUrl  pgtype.Text `db:"callback_url" json:"callback_url"`
+	Options      []byte      `db:"options" json:"options"`
+	Metadata     []byte      `db:"metadata" json:"metadata"`
+	Status       JobStatus   `db:"status" json:"status"`
 }
 
 // db/query/scraping_jobs.sql
@@ -356,14 +354,14 @@ LIMIT $2
 `
 
 type GetJobsForCleanupParams struct {
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	Limit     int32     `db:"limit" json:"limit"`
+	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
+	Limit     int32            `db:"limit" json:"limit"`
 }
 
 type GetJobsForCleanupRow struct {
-	ID        string      `db:"id" json:"id"`
-	CreatedAt time.Time   `db:"created_at" json:"created_at"`
-	Status    interface{} `db:"status" json:"status"`
+	ID        string           `db:"id" json:"id"`
+	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
+	Status    JobStatus        `db:"status" json:"status"`
 }
 
 func (q *Queries) GetJobsForCleanup(ctx context.Context, arg GetJobsForCleanupParams) ([]GetJobsForCleanupRow, error) {
@@ -394,8 +392,8 @@ LIMIT $2
 `
 
 type GetRecentJobsParams struct {
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	Limit     int32     `db:"limit" json:"limit"`
+	CreatedAt pgtype.Timestamp `db:"created_at" json:"created_at"`
+	Limit     int32            `db:"limit" json:"limit"`
 }
 
 func (q *Queries) GetRecentJobs(ctx context.Context, arg GetRecentJobsParams) ([]ScrapingJobs, error) {
@@ -495,7 +493,7 @@ AND started_at < $1
 ORDER BY started_at ASC
 `
 
-func (q *Queries) GetStaleProcessingJobs(ctx context.Context, startedAt time.Time) ([]ScrapingJobs, error) {
+func (q *Queries) GetStaleProcessingJobs(ctx context.Context, startedAt pgtype.Timestamp) ([]ScrapingJobs, error) {
 	rows, err := q.db.Query(ctx, GetStaleProcessingJobs, startedAt)
 	if err != nil {
 		return nil, err
@@ -671,9 +669,9 @@ LIMIT $2 OFFSET $3
 `
 
 type ListScrapingJobsByStatusParams struct {
-	Status interface{} `db:"status" json:"status"`
-	Limit  int32       `db:"limit" json:"limit"`
-	Offset int32       `db:"offset" json:"offset"`
+	Status JobStatus `db:"status" json:"status"`
+	Limit  int32     `db:"limit" json:"limit"`
+	Offset int32     `db:"offset" json:"offset"`
 }
 
 func (q *Queries) ListScrapingJobsByStatus(ctx context.Context, arg ListScrapingJobsByStatusParams) ([]ScrapingJobs, error) {
@@ -821,8 +819,8 @@ RETURNING id, url, datasource_id, callback_url, options, metadata, status, progr
 `
 
 type UpdateJobResultsParams struct {
-	ID      string          `db:"id" json:"id"`
-	Results json.RawMessage `db:"results" json:"results"`
+	ID      string `db:"id" json:"id"`
+	Results []byte `db:"results" json:"results"`
 }
 
 func (q *Queries) UpdateJobResults(ctx context.Context, arg UpdateJobResultsParams) (ScrapingJobs, error) {
@@ -857,7 +855,7 @@ RETURNING id, url, datasource_id, callback_url, options, metadata, status, progr
 
 type UpdateJobStatusParams struct {
 	ID       string      `db:"id" json:"id"`
-	Status   interface{} `db:"status" json:"status"`
+	Status   JobStatus   `db:"status" json:"status"`
 	Progress pgtype.Int4 `db:"progress" json:"progress"`
 }
 

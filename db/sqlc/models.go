@@ -5,9 +5,6 @@
 package db
 
 import (
-	"encoding/json"
-	"time"
-
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -23,19 +20,19 @@ type JobMetrics struct {
 }
 
 type ScrapingJobs struct {
-	ID           string          `db:"id" json:"id"`
-	Url          string          `db:"url" json:"url"`
-	DatasourceID pgtype.Int4     `db:"datasource_id" json:"datasource_id"`
-	CallbackUrl  pgtype.Text     `db:"callback_url" json:"callback_url"`
-	Options      json.RawMessage `db:"options" json:"options"`
-	Metadata     json.RawMessage `db:"metadata" json:"metadata"`
-	Status       interface{}     `db:"status" json:"status"`
-	Progress     pgtype.Int4     `db:"progress" json:"progress"`
-	StartedAt    time.Time       `db:"started_at" json:"started_at"`
-	CompletedAt  **time.Time     `db:"completed_at" json:"completed_at"`
-	Error        pgtype.Text     `db:"error" json:"error"`
-	RetryCount   pgtype.Int4     `db:"retry_count" json:"retry_count"`
-	Results      json.RawMessage `db:"results" json:"results"`
-	CreatedAt    time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time       `db:"updated_at" json:"updated_at"`
+	ID           string           `db:"id" json:"id"`
+	Url          string           `db:"url" json:"url"`
+	DatasourceID pgtype.Int4      `db:"datasource_id" json:"datasource_id"`
+	CallbackUrl  pgtype.Text      `db:"callback_url" json:"callback_url"`
+	Options      []byte           `db:"options" json:"options"`
+	Metadata     []byte           `db:"metadata" json:"metadata"`
+	Status       JobStatus        `db:"status" json:"status"`
+	Progress     pgtype.Int4      `db:"progress" json:"progress"`
+	StartedAt    pgtype.Timestamp `db:"started_at" json:"started_at"`
+	CompletedAt  pgtype.Timestamp `db:"completed_at" json:"completed_at"`
+	Error        pgtype.Text      `db:"error" json:"error"`
+	RetryCount   pgtype.Int4      `db:"retry_count" json:"retry_count"`
+	Results      []byte           `db:"results" json:"results"`
+	CreatedAt    pgtype.Timestamp `db:"created_at" json:"created_at"`
+	UpdatedAt    pgtype.Timestamp `db:"updated_at" json:"updated_at"`
 }

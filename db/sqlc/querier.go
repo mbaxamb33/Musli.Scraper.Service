@@ -6,14 +6,15 @@ package db
 
 import (
 	"context"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Querier interface {
 	CancelJob(ctx context.Context, id string) (ScrapingJobs, error)
-	CleanupOldJobs(ctx context.Context, createdAt time.Time) error
+	CleanupOldJobs(ctx context.Context, createdAt pgtype.Timestamp) error
 	CompleteJob(ctx context.Context, arg CompleteJobParams) (ScrapingJobs, error)
-	CountJobsByStatus(ctx context.Context, status interface{}) (int64, error)
+	CountJobsByStatus(ctx context.Context, status JobStatus) (int64, error)
 	CountTotalJobs(ctx context.Context) (int64, error)
 	// db/query/scraping_jobs.sql
 	// SQLC queries for scraping jobs management
@@ -28,7 +29,7 @@ type Querier interface {
 	GetRecentJobs(ctx context.Context, arg GetRecentJobsParams) ([]ScrapingJobs, error)
 	GetScrapingJob(ctx context.Context, id string) (ScrapingJobs, error)
 	GetScrapingJobByURL(ctx context.Context, url string) (ScrapingJobs, error)
-	GetStaleProcessingJobs(ctx context.Context, startedAt time.Time) ([]ScrapingJobs, error)
+	GetStaleProcessingJobs(ctx context.Context, startedAt pgtype.Timestamp) ([]ScrapingJobs, error)
 	ListPendingJobs(ctx context.Context, limit int32) ([]ScrapingJobs, error)
 	ListProcessingJobs(ctx context.Context) ([]ScrapingJobs, error)
 	ListScrapingJobs(ctx context.Context, arg ListScrapingJobsParams) ([]ScrapingJobs, error)
