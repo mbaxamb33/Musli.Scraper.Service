@@ -516,7 +516,13 @@ func (js *JobService) CleanupOldJobs(ctx context.Context) (int64, error) {
 		zap.Time("cutoff", cutoff),
 		zap.Duration("retention_period", js.config.JobRetentionPeriod))
 
-	err := js.db.GetQueries().CleanupOldJobs(ctx, cutoff)
+	// Convert time.Time to pgtype.Timestamp
+	pgCutoff := pgtype.Timestamp{
+		Time:  cutoff,
+		Valid: true,
+	}
+
+	err := js.db.GetQueries().CleanupOldJobs(ctx, pgCutoff)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup failed: %w", err)
 	}
@@ -672,12 +678,20 @@ func (js *JobService) sendHTTPCallback(ctx context.Context, callbackURL string, 
 
 func (js *JobService) convertDBJobToModel(dbJob db.ScrapingJobs) (*models.ScrapingJob, error) {
 	job := &models.ScrapingJob{
-		ID:        dbJob.ID,
-		URL:       dbJob.Url,
-		Status:    js.convertDBStatusToModel(dbJob.Status),
-		CreatedAt: dbJob.CreatedAt,
-		UpdatedAt: dbJob.UpdatedAt,
-		StartedAt: dbJob.StartedAt,
+		ID:     dbJob.ID,
+		URL:    dbJob.Url,
+		Status: js.convertDBStatusToModel(dbJob.Status),
+	}
+
+	// Handle timestamp fields
+	if dbJob.CreatedAt.Valid {
+		job.CreatedAt = dbJob.CreatedAt.Time
+	}
+	if dbJob.UpdatedAt.Valid {
+		job.UpdatedAt = dbJob.UpdatedAt.Time
+	}
+	if dbJob.StartedAt.Valid {
+		job.StartedAt = dbJob.StartedAt.Time
 	}
 
 	// Handle optional fields
@@ -693,8 +707,8 @@ func (js *JobService) convertDBJobToModel(dbJob db.ScrapingJobs) (*models.Scrapi
 		job.Progress = int(dbJob.Progress.Int32)
 	}
 
-	if dbJob.CompletedAt != nil && *dbJob.CompletedAt != nil {
-		job.CompletedAt = *dbJob.CompletedAt
+	if dbJob.CompletedAt.Valid {
+		job.CompletedAt = &dbJob.CompletedAt.Time
 	}
 
 	if dbJob.Error.Valid {
@@ -731,19 +745,27 @@ func (js *JobService) convertDBJobToModel(dbJob db.ScrapingJobs) (*models.Scrapi
 
 func (js *JobService) convertDBJobToResponse(dbJob db.ScrapingJobs) (*models.ScrapingJobResponse, error) {
 	job := &models.ScrapingJobResponse{
-		ID:        dbJob.ID,
-		Status:    js.convertDBStatusToModel(dbJob.Status),
-		CreatedAt: dbJob.CreatedAt,
-		UpdatedAt: dbJob.UpdatedAt,
-		StartedAt: dbJob.StartedAt,
+		ID:     dbJob.ID,
+		Status: js.convertDBStatusToModel(dbJob.Status),
+	}
+
+	// Handle timestamp fields
+	if dbJob.CreatedAt.Valid {
+		job.CreatedAt = dbJob.CreatedAt.Time
+	}
+	if dbJob.UpdatedAt.Valid {
+		job.UpdatedAt = dbJob.UpdatedAt.Time
+	}
+	if dbJob.StartedAt.Valid {
+		job.StartedAt = dbJob.StartedAt.Time
 	}
 
 	if dbJob.Progress.Valid {
 		job.Progress = int(dbJob.Progress.Int32)
 	}
 
-	if dbJob.CompletedAt != nil && *dbJob.CompletedAt != nil {
-		job.CompletedAt = *dbJob.CompletedAt
+	if dbJob.CompletedAt.Valid {
+		job.CompletedAt = &dbJob.CompletedAt.Time
 	}
 
 	if dbJob.Error.Valid {
